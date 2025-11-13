@@ -1,32 +1,16 @@
-# backbone 옵션: 커맨드 단에서 처리
-# # KoBERT 백본 사용
-# python train_projection.py --backbone kobert
-#
-# # KPF(HuggingFace) 백본 사용
-# python train_projection.py --backbone hf --hf_model_name kpf-multilingual-base
-
-
-
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 """
 train_projection.py
 
-- KoBERT(혹은 HuggingFace 백본)을 기반으로
-- original + article_text + 4-class(label) 데이터셋을 이용하여
-- Projection Layer를 Supervised Contrastive Learning으로 학습하고
-- 프레이밍 임베딩 Encoder를 저장하는 스크립트.
-
-데이터셋 포맷 (CSV 또는 PKL 가정):
-    id, original, article_text, label
-label: 0 = 정상, 1 = Topic, 2 = Lexical, 3 = Narrative
+- KoBERT 또는 HuggingFace(KPF 등) 백본 선택
+- original + article_text + label(4-class) 기반 Supervised Contrastive Learning
+- Projection Layer 학습 후 Encoder 저장
 """
 
 import os
 import argparse
-from types import SimpleNamespace
-
 import pandas as pd
 import torch
 import torch.nn as nn
@@ -36,31 +20,24 @@ from torch.utils.data import Dataset, DataLoader
 from tqdm.auto import tqdm
 from sklearn.model_selection import train_test_split
 
-from util import set_seed, AverageMeter          # ✅ 레포 util 재사용
-from kobert_transformers import get_kobert_model, get_tokenizer  # ✅ 레포와 동일
+from util import set_seed, AverageMeter
+from kobert_transformers import get_kobert_model, get_tokenizer
 
 from transformers import AutoModel, AutoTokenizer
 
 
 # =========================
-#  Dataset
+# Dataset
 # =========================
-
 class FramingDataset(Dataset):
-    """
-    columns: id, original, article_text, label
-    original 과 article_text 두 문장을 하나의 입력으로 사용:
-        [CLS] original [SEP] article_text [SEP]
-    """
     def __init__(self, df: pd.DataFrame, tokenizer, max_len: int = 256):
         self.df = df.reset_index(drop=True)
         self.tokenizer = tokenizer
         self.max_len = max_len
 
-        required_cols = {"original", "article_text", "label"}
-        missing = required_cols - set(self.df.columns)
-        if missing:
-            raise ValueError(f"DataFrame is missing required columns: {missing}")
+        required = {"original", "article_text", "label"}
+        if not required.issubset(self.df.columns):
+            raise ValueError(f"Dataset missing required columns: {required}")
 
     def __len__(self):
         return len(self.df)
@@ -80,146 +57,113 @@ class FramingDataset(Dataset):
             return_tensors="pt",
         )
 
-        item = {
+        return {
             "input_ids": encoding["input_ids"].squeeze(0),
             "attention_mask": encoding["attention_mask"].squeeze(0),
             "label": torch.tensor(label, dtype=torch.long),
         }
-        return item
 
 
 # =========================
-#  SupConLoss
+# Supervised Contrastive Loss
 # =========================
-
 class SupConLoss(nn.Module):
-    """
-    Supervised Contrastive Loss
-    reference: https://arxiv.org/abs/2004.11362
-    - features: [batch, dim]
-    - labels: [batch]
-    """
-    def __init__(self, temperature: float = 0.07):
+    def __init__(self, temperature=0.07):
         super().__init__()
         self.temperature = temperature
 
-    def forward(self, features: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    def forward(self, features, labels):
         device = features.device
+        labels = labels.contiguous().view(-1, 1)
         batch_size = features.size(0)
 
-        # [B, 1]
-        labels = labels.contiguous().view(-1, 1)
-        # [B, B] 같은 라벨이면 1, 아니면 0
+        # same label = positive
         mask = torch.eq(labels, labels.T).float().to(device)
 
-        # 유사도 행렬 (cosine 대신 dot/temperature 사용)
         logits = torch.div(features @ features.T, self.temperature)
 
-        # 자기 자신 마스크 제거
+        # remove self-contrast
         logits_mask = torch.ones_like(mask) - torch.eye(batch_size, device=device)
         mask = mask * logits_mask
 
-        # 안정적인 softmax를 위한 정규화
-        logits = logits - torch.max(logits, dim=1, keepdim=True)[0]
-        exp_logits = torch.exp(logits) * logits_mask
+        logits_max, _ = torch.max(logits, dim=1, keepdim=True)
+        logits = logits - logits_max.detach()
 
-        # log_prob = log( p_pos / p_all )
+        exp_logits = torch.exp(logits) * logits_mask
         log_prob = logits - torch.log(exp_logits.sum(1, keepdim=True) + 1e-12)
 
-        # 양성(같은 라벨)들에 대한 평균 log_prob
         mean_log_prob_pos = (mask * log_prob).sum(1) / (mask.sum(1) + 1e-12)
 
-        # loss = - E[mean_log_prob_pos]
-        loss = -mean_log_prob_pos.mean()
-        return loss
+        return -mean_log_prob_pos.mean()
 
 
 # =========================
-#  Encoder (Backbone + Projection)
+# Encoder (Backbone + Projection)
 # =========================
-
 class FramingEncoder(nn.Module):
-    """
-    Backbone(BERT 계열) + Projection Layer
-    - backbone: HuggingFace/BERT-style 모델 (pooler_output 사용)
-    - projection: 768 -> hidden_size -> hidden_size
-    """
-    def __init__(self, backbone: nn.Module, hidden_size: int = 100):
+    def __init__(self, backbone, hidden_size=100):
         super().__init__()
         self.backbone = backbone
-        # 768은 KoBERT 기준, 다른 모델은 config.hidden_size 사용 가능
-        backbone_hidden = getattr(backbone.config, "hidden_size", 768)
+
+        backbone_dim = backbone.config.hidden_size
         self.projection = nn.Sequential(
-            nn.Linear(backbone_hidden, hidden_size),
+            nn.Linear(backbone_dim, hidden_size),
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
         )
 
     def forward(self, input_ids, attention_mask):
-        out = self.backbone(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
-        # [batch, hidden]
+        out = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
         pooled = out.pooler_output
         z = self.projection(pooled)
-        # contrastive 학습용 정규화
-        z = F.normalize(z, dim=-1)
-        return z
+        return F.normalize(z, dim=-1)
 
 
 # =========================
-#  Backbone Loader
+# Backbone Loader
 # =========================
-
 def load_backbone_and_tokenizer(args):
-    """
-    args.backbone:
-        - 'kobert' : 기존 레포의 KoBERT 사용
-        - 'hf'     : HuggingFace model_name 사용 (args.hf_model_name)
-    """
     if args.backbone == "kobert":
+        print("[INFO] Using KoBERT backbone")
         backbone = get_kobert_model()
         tokenizer = get_tokenizer()
+        return backbone, tokenizer
+
     elif args.backbone == "hf":
         if args.hf_model_name is None:
-            raise ValueError("When backbone='hf', --hf_model_name must be set.")
-        tokenizer = AutoTokenizer.from_pretrained("KPF/KPF-bert-ner")
-        backbone = AutoModel.from_pretrained("KPF/KPF-bert-ner")
+            raise ValueError("--hf_model_name must be provided for HF backbone")
+
+        print(f"[INFO] Using HF backbone: {args.hf_model_name}")
+        tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
+        backbone = AutoModel.from_pretrained(args.hf_model_name)
+
+        return backbone, tokenizer
+
     else:
         raise ValueError(f"Unknown backbone type: {args.backbone}")
 
-    return backbone, tokenizer
-
 
 # =========================
-#  Train / Eval
+# Training
 # =========================
-
 def train_projection(args):
-    # -----------------
-    # 준비
-    # -----------------
     os.makedirs(args.save_dir, exist_ok=True)
     set_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"[INFO] Using device: {device}")
+    print(f"[INFO] Device: {device}")
 
-    # -----------------
-    # 데이터 로드
-    # -----------------
+    # ---------- Load Data ----------
     if args.data_path.endswith(".csv"):
         df = pd.read_csv(args.data_path)
-    elif args.data_path.endswith(".pkl") or args.data_path.endswith(".pickle"):
+    elif args.data_path.endswith(".pkl"):
         df = pd.read_pickle(args.data_path)
     else:
-        raise ValueError("data_path must be .csv or .pkl/.pickle")
+        raise ValueError("Dataset must be .csv or .pkl")
 
     if "label" not in df.columns:
-        raise ValueError("Dataset must contain 'label' column (0=정상, 1=Topic, 2=Lexical, 3=Narrative).")
+        raise ValueError("Dataset must contain column 'label'")
 
-    # train / valid split
     train_df, valid_df = train_test_split(
         df,
         test_size=args.val_ratio,
@@ -227,159 +171,120 @@ def train_projection(args):
         stratify=df["label"],
     )
 
-    # -----------------
-    # Backbone + Tokenizer
-    # -----------------
+    # ---------- Backbone ----------
     backbone, tokenizer = load_backbone_and_tokenizer(args)
-    encoder = FramingEncoder(backbone=backbone, hidden_size=args.projection_hidden_size)
 
-    if args.freeze_backbone:
-        for p in encoder.backbone.parameters():
-            p.requires_grad = False
-        print("[INFO] Backbone parameters are frozen. Only projection layer will be trained.")
-    else:
-        print("[INFO] Backbone + projection will be trained.")
-
+    encoder = FramingEncoder(backbone, hidden_size=args.projection_hidden_size)
     encoder = encoder.to(device)
 
-    # -----------------
-    # DataLoader
-    # -----------------
-    train_dataset = FramingDataset(train_df, tokenizer, max_len=args.max_len)
-    valid_dataset = FramingDataset(valid_df, tokenizer, max_len=args.max_len)
+    if args.freeze_backbone:
+        print("[INFO] Freezing backbone; training projection only")
+        for p in encoder.backbone.parameters():
+            p.requires_grad = False
 
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=args.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
-    valid_loader = DataLoader(
-        valid_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
-    )
+    # ---------- Dataset ----------
+    train_dataset = FramingDataset(train_df, tokenizer, args.max_len)
+    valid_dataset = FramingDataset(valid_df, tokenizer, args.max_len)
 
-    # -----------------
-    # Loss / Optimizer
-    # -----------------
-    criterion = SupConLoss(temperature=args.temperature).to(device)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_dataset, batch_size=args.batch_size, shuffle=False)
+
+    # ---------- Loss / Optimizer ----------
+    criterion = SupConLoss(args.temperature).to(device)
+
     optimizer = torch.optim.AdamW(
         filter(lambda p: p.requires_grad, encoder.parameters()),
         lr=args.learning_rate,
         weight_decay=args.weight_decay,
     )
 
-    # -----------------
-    # Training Loop
-    # -----------------
-    print("[INFO] Start training projection layer (Supervised Contrastive Learning)")
-    best_val_loss = float("inf")
+    # ---------- Training Loop ----------
+    best_loss = float("inf")
+    print("[INFO] Start Contrastive Learning")
 
     for epoch in range(1, args.epochs + 1):
         encoder.train()
-        train_loss_meter = AverageMeter()
+        meter = AverageMeter()
 
-        tbar = tqdm(train_loader, desc=f"[Epoch {epoch}/{args.epochs}] Train", ncols=100)
+        tbar = tqdm(train_loader, desc=f"[Epoch {epoch}] Train")
+
         for batch in tbar:
             input_ids = batch["input_ids"].to(device)
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["label"].to(device)
 
-            z = encoder(input_ids=input_ids, attention_mask=attention_mask)
+            z = encoder(input_ids, attention_mask)
             loss = criterion(z, labels)
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
-            train_loss_meter.update(loss.item(), input_ids.size(0))
-            tbar.set_postfix(loss=f"{train_loss_meter.avg:.4f}")
+            meter.update(loss.item(), input_ids.size(0))
+            tbar.set_postfix(loss=f"{meter.avg:.4f}")
 
-        # -----------------
-        # Validation
-        # -----------------
+        # ---------- Validation ----------
         encoder.eval()
-        val_loss_meter = AverageMeter()
+        val_meter = AverageMeter()
+
         with torch.no_grad():
-            vbar = tqdm(valid_loader, desc=f"[Epoch {epoch}/{args.epochs}] Valid", ncols=100)
-            for batch in vbar:
+            for batch in tqdm(valid_loader, desc=f"[Epoch {epoch}] Valid"):
                 input_ids = batch["input_ids"].to(device)
                 attention_mask = batch["attention_mask"].to(device)
                 labels = batch["label"].to(device)
 
-                z = encoder(input_ids=input_ids, attention_mask=attention_mask)
+                z = encoder(input_ids, attention_mask)
                 loss = criterion(z, labels)
+                val_meter.update(loss.item(), input_ids.size(0))
 
-                val_loss_meter.update(loss.item(), input_ids.size(0))
-                vbar.set_postfix(loss=f"{val_loss_meter.avg:.4f}")
+        print(f"Epoch {epoch} | Train Loss: {meter.avg:.4f} | Val Loss: {val_meter.avg:.4f}")
 
-        print(f"[Epoch {epoch}] Train Loss: {train_loss_meter.avg:.4f} | Val Loss: {val_loss_meter.avg:.4f}")
+        # Save best
+        if val_meter.avg < best_loss:
+            best_loss = val_meter.avg
+            path = os.path.join(args.save_dir, "projection_encoder_best.bin")
+            torch.save(encoder.state_dict(), path)
+            print(f"[INFO] Best model saved → {path}")
 
-        # -----------------
-        # Checkpoint 저장
-        # -----------------
-        is_best = val_loss_meter.avg < best_val_loss
-        if is_best:
-            best_val_loss = val_loss_meter.avg
-            save_path = os.path.join(args.save_dir, "projection_encoder_best.bin")
-            torch.save(encoder.state_dict(), save_path)
-            print(f"[INFO] Best model updated. Saved to: {save_path}")
+        # Save last
+        path = os.path.join(args.save_dir, "projection_encoder_last.bin")
+        torch.save(encoder.state_dict(), path)
 
-        # 마지막 epoch도 저장 (옵션)
-        last_path = os.path.join(args.save_dir, "projection_encoder_last.bin")
-        torch.save(encoder.state_dict(), last_path)
-
-    print("[INFO] Training finished.")
-    print(f"[INFO] Best validation loss: {best_val_loss:.4f}")
+    print("[INFO] Training completed.")
 
 
 # =========================
-#  Main
+# CLI Arguments
 # =========================
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="Train Projection Layer for Framing Embedding (Supervised Contrastive Learning)")
+    p = argparse.ArgumentParser()
 
-    # Data
-    parser.add_argument("--data_path", type=str, required=True,
-                        help="Path to dataset file (.csv or .pkl) with columns: id, original, article_text, label")
-    parser.add_argument("--val_ratio", type=float, default=0.2, help="Validation ratio")
-    parser.add_argument("--max_len", type=int, default=256, help="Max sequence length")
+    p.add_argument("--data_path", type=str, required=True)
+    p.add_argument("--val_ratio", type=float, default=0.2)
+    p.add_argument("--max_len", type=int, default=256)
 
     # Backbone
-    parser.add_argument("--backbone", type=str, default="kobert",
-                        choices=["kobert", "hf"],
-                        help="Backbone type: 'kobert' or 'hf'(HuggingFace)")
-    parser.add_argument("--hf_model_name", type=str, default=None,
-                        help="HuggingFace model name (used when backbone='hf'), e.g., 'klue/roberta-base'")
+    p.add_argument("--backbone", choices=["kobert", "hf"], default="kobert")
+    p.add_argument("--hf_model_name", type=str, default=None)
 
     # Training
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--split_seed", type=int, default=0, help="Random seed for train/valid split")
-    parser.add_argument("--batch_size", type=int, default=16, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
-    parser.add_argument("--learning_rate", type=float, default=3e-5, help="Learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
-    parser.add_argument("--num_workers", type=int, default=2, help="Num workers for DataLoader")
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--split_seed", type=int, default=0)
+    p.add_argument("--batch_size", type=int, default=16)
+    p.add_argument("--epochs", type=int, default=5)
+    p.add_argument("--learning_rate", type=float, default=3e-5)
+    p.add_argument("--weight_decay", type=float, default=1e-4)
+    p.add_argument("--num_workers", type=int, default=2)
 
-    # Projection
-    parser.add_argument("--projection_hidden_size", type=int, default=100,
-                        help="Hidden size of projection layer (output embedding dim)")
-    parser.add_argument("--temperature", type=float, default=0.07,
-                        help="Temperature for SupConLoss")
-    parser.add_argument("--freeze_backbone", action="store_true",
-                        help="Freeze backbone and train only projection layer")
+    # Projection Layer
+    p.add_argument("--projection_hidden_size", type=int, default=100)
+    p.add_argument("--temperature", type=float, default=0.07)
+    p.add_argument("--freeze_backbone", action="store_true")
 
-    # Save
-    parser.add_argument("--save_dir", type=str, default="./model/projection_encoder/",
-                        help="Directory to save trained encoder")
+    # Save dir
+    p.add_argument("--save_dir", type=str, default="./model/projection_encoder/")
 
-    args = parser.parse_args()
-    return args
+    return p.parse_args()
 
 
 if __name__ == "__main__":
