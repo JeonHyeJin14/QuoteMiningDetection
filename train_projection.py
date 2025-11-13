@@ -184,8 +184,8 @@ def load_backbone_and_tokenizer(args):
     elif args.backbone == "hf":
         if args.hf_model_name is None:
             raise ValueError("When backbone='hf', --hf_model_name must be set.")
-        tokenizer = AutoTokenizer.from_pretrained(args.KPF/KPF-bert-ner)
-        backbone = AutoModel.from_pretrained(args.KPF/KPF-bert-ner)
+        tokenizer = AutoTokenizer.from_pretrained("KPF/KPF-bert-ner")
+        backbone = AutoModel.from_pretrained("KPF/KPF-bert-ner")
     else:
         raise ValueError(f"Unknown backbone type: {args.backbone}")
 
