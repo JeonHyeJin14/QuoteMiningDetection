@@ -15,11 +15,12 @@ from detection_datasets import(
 
 from models import Encoder, Detection_Model
 from util import AverageMeter, set_seed
+from torch.optim import AdamW
 
 from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.metrics import f1_score, accuracy_score, roc_auc_score, recall_score, precision_score
-from transformers import AdamW, get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup
 from kobert_transformers import get_kobert_model
 from kobert_transformers import get_tokenizer
 
