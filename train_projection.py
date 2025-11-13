@@ -181,11 +181,11 @@ def load_backbone_and_tokenizer(args):
     if args.backbone == "kobert":
         backbone = get_kobert_model()
         tokenizer = get_tokenizer()
-    elif args.backbone == "hf": # TODO 사용할 hf 모델 이름으로 바꿔 넣기
+    elif args.backbone == "hf":
         if args.hf_model_name is None:
             raise ValueError("When backbone='hf', --hf_model_name must be set.")
-        tokenizer = AutoTokenizer.from_pretrained(args.hf_model_name)
-        backbone = AutoModel.from_pretrained(args.hf_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(args.KPF/KPF-bert-ner)
+        backbone = AutoModel.from_pretrained(args.KPF/KPF-bert-ner)
     else:
         raise ValueError(f"Unknown backbone type: {args.backbone}")
 
