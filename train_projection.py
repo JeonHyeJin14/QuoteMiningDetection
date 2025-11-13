@@ -287,6 +287,8 @@ def train_projection(args):
     plt.legend()
     plt.grid(True)
     plt.show()
+    plt.savefig(os.path.join(args.save_dir, "loss_curve.png"))
+    print("[INFO] loss_curve.png saved.")
 
 
 # =========================
