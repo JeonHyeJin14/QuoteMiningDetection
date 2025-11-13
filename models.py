@@ -3,18 +3,24 @@ import torch
 
 
 class Encoder(nn.Module):
-    def __init__(self, args):
-        super(Encoder, self).__init__()
+    def __init__(self, backbone, hidden_size=100):
+        super().__init__()
+        self.backbone = backbone
+        self.hidden_size = hidden_size
 
-        self.encoder = args.backbone_model
-        self.mlp_projection = nn.Sequential(nn.Linear(args.dimension_size, args.hidden_size),
-                                            nn.ReLU(),
-                                            nn.Linear(args.hidden_size, args.hidden_size, bias=True))
+        backbone_dim = backbone.config.hidden_size
+
+        self.projection = nn.Sequential(
+            nn.Linear(backbone_dim, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
 
     def forward(self, input_ids, attention_mask):
-        output = self.encoder(input_ids=torch.tensor(input_ids), attention_mask=torch.tensor(attention_mask))
-        embedding = output['pooler_output']
-        return self.mlp_projection(embedding)
+        out = self.backbone(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = out.pooler_output
+        z = self.projection(pooled)
+        return F.normalize(z, dim=-1)
     
     
     
