@@ -62,5 +62,3 @@ For more details and background about the task and method, please check [our pap
   year={2023}
 }
 ```
-
-[Download Pre-trained Model] 모델을 실행하려면 가중치 파일이 필요합니다. 아래 링크에서 다운로드 받아 프로젝트 폴더에 넣어주세요. 👉 [https://drive.google.com/file/d/1jlv7PBu06YOY83SAx1gDq2WTWf9cB1nq/view?usp=drive_link]
