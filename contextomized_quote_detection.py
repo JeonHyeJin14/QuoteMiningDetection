@@ -38,14 +38,16 @@ def main():
     parser.add_argument("--hidden_size", default=100, type=int, help="hidden size")    
     parser.add_argument("--classifier_input_size", default=100, type=int, help="input dimension size of classifier") 
     parser.add_argument("--classifier_hidden_size", default=64, type=int, help="hidden size of classifier")     
-    parser.add_argument("--learning_rate", default=1e-2, type=float, help="learning rate") 
+    parser.add_argument("--learning_rate", default=1e-3, type=float, help="learning rate") 
     parser.add_argument("--weight_decay", default=1e-5, type=float, help="weight decay")   
     parser.add_argument("--epochs", default=10, type=int, help="epoch")    
     parser.add_argument("--schedule", default=True, type=bool, help="whether to use the scheduler or not")    
     
     parser.add_argument("--DATA_DIR", default='./data/our_dataset_clean.csv', type=str, help="data to detect contextomized quote")
     parser.add_argument("--MODEL_DIR", default='./model/projection_encoder_best.bin', type=str, help="pretrained QuoteCSE model")
-    parser.add_argument("--MODEL_SAVE_DIR", default='./model/contextomized_detection/', type=str, help="fine-tuned QuoteCSE model")
+    parser.add_argument("--MODEL_SAVE_DIR", default='./model/contextomized_detection/', type=str, help="fine-tuned QuoteCSE model")   
+     # 여기 추가
+    parser.add_argument("--patience", default=3, type=int, help="early stopping patience (in epochs)")
     
     args = parser.parse_args()
 
@@ -57,8 +59,12 @@ def main():
     set_seed(args.seed)
     
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.batch_size = args.batch_size * torch.cuda.device_count()
+    args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# args.batch_size = args.batch_size * torch.cuda.device_count()
+
     
+        # KoBERT 백본 & 토크나이저
     args.backbone_model = get_kobert_model()
     args.tokenizer = get_tokenizer()
     
@@ -71,13 +77,34 @@ def main():
     X_train, y_train = ros.fit_resample(X=df_train.loc[:, ['article_text', 'distorted']].values, y=df_train['label'])
     df_train_ros = pd.DataFrame(X_train, columns=['article_text', 'distorted'])
     df_train_ros['label'] = y_train
-    
+    # RAM 방지를 위해 Oversampled 데이터 2000개만 사용
+    df_train_ros = df_train_ros.sample(n=2000, random_state       =args.seed).reset_index(drop=True)
+
     loss_func = nn.CrossEntropyLoss(reduction='mean')
     
-    encoder = Encoder(args)
-    encoder = nn.DataParallel(encoder)
-    encoder.load_state_dict(torch.load(args.MODEL_DIR)) 
+    # ===== Encoder 로딩 (우리가 Jupyter에서 성공한 방식) =====
+    encoder = Encoder(args.backbone_model, hidden_size=args.hidden_size)
+
+    raw_state = torch.load(args.MODEL_DIR, map_location=args.device)
+
+    new_state = {}
+    for k, v in raw_state.items():
+        if k.startswith("module.encoder."):
+            new_key = "backbone." + k[len("module.encoder."):]
+            new_state[new_key] = v
+        elif k.startswith("module.mlp_projection."):
+            new_key = "projection." + k[len("module.mlp_projection."):]
+            new_state[new_key] = v
+        else:
+            continue
+
+    missing, unexpected = encoder.load_state_dict(new_state, strict=False)
+    print("encoder missing keys:", missing)
+    print("encoder unexpected keys:", unexpected)
+
     encoder = encoder.to(args.device)
+    encoder.eval()
+
 
     classifier = Detection_Model(4, args)
     classifier = nn.DataParallel(classifier)
@@ -100,18 +127,23 @@ def main():
     
     print('Making Dataloader')
     train_data_loader = create_data_loader(args, df_train_ros, shuffle=True, drop_last=True)
-    test_data_loader = create_data_loader(args, df_test, shuffle=False, drop_last=False)
+    test_data_loader = create_data_loader(args, df_test, shuffle=False, drop_last=True)
+
 
     trainloader =  make_tensorloader(args, encoder, train_data_loader, train=True)
     testloader  = make_tensorloader(args, encoder, test_data_loader)
-
+    
+    # Early Stopping용 변수
+    best_val_loss = float('inf')
+    best_epoch = -1
+    patience_counter = 0
+    best_state_dict = None  # 가장 좋은 classifier 가중치 저장용
 
     loss_data = []
     print('Start Training')
     for epoch in range(args.epochs):
+        # ========= Train =========
         train_losses = AverageMeter()
-
-        train_loss = []
 
         tbar = tqdm(trainloader)
         classifier.train()
@@ -136,6 +168,42 @@ def main():
 
         loss_data.append([epoch, train_losses.avg, 'Train'])
 
+        # ========= Validation (loss만) =========
+        val_losses = AverageMeter()
+        classifier.eval()
+        with torch.no_grad():
+            for embedding, label in testloader:
+                embedding = embedding.to(args.device)
+                label = label.to(args.device)
+
+                out = classifier(embedding)
+                val_loss = loss_func(out, label)
+                val_losses.update(val_loss.item(), args.batch_size)
+
+                del out, val_loss
+
+        val_loss_epoch = val_losses.avg
+        loss_data.append([epoch, val_loss_epoch, 'Valid'])
+
+        # === 여기서 둘 다 출력 ===
+        print(f"[LOSS] epoch={epoch} split=Train loss={train_losses.avg:.4f}")
+        print(f"[LOSS] epoch={epoch} split=Valid loss={val_losses.avg:.4f}")
+
+        # ========= Early Stopping 체크 =========
+        # 약간의 마진(1e-4)까지 포함해서 더 좋아졌다고 판단
+        if val_loss_epoch < best_val_loss - 1e-4:
+            best_val_loss = val_loss_epoch
+            best_epoch = epoch
+            patience_counter = 0
+            best_state_dict = classifier.state_dict()
+            print(f"[EARLY STOP] New best at epoch {epoch} | val_loss={best_val_loss:.4f}")
+        else:
+            patience_counter += 1
+            print(f"[EARLY STOP] No improvement. patience={patience_counter}/{args.patience}")
+            if patience_counter >= args.patience:
+                print(f"[EARLY STOP] Stop training at epoch {epoch}. Best epoch={best_epoch}, best val_loss={best_val_loss:.4f}")
+                break
+            
     tbar2 = tqdm(testloader)
     classifier.eval()
     with torch.no_grad():
@@ -179,6 +247,35 @@ def main():
         # 샘플 수가 너무 적거나, 특정 클래스가 아예 안 나온 경우 등에서 터질 수 있음
         auc_macro_ovr = None
 
+    # ===== 클래스별 지표 추가 =====
+    # label id → 이름 매핑 (원하는 이름으로 바꿔도 됨)
+    label_ids = [0, 1, 2, 3]
+    label_names = {
+        0: "Normal",
+        1: "Topic",
+        2: "Lexical",
+        3: "Narrative",
+    }
+
+    precision_per_class = precision_score(
+        y_true, y_pred,
+        labels=label_ids,
+        average=None,
+        zero_division=0,
+    )
+    recall_per_class = recall_score(
+        y_true, y_pred,
+        labels=label_ids,
+        average=None,
+        zero_division=0,
+    )
+    f1_per_class = f1_score(
+        y_true, y_pred,
+        labels=label_ids,
+        average=None,
+        zero_division=0,
+    )
+
     print("===== Evaluation (4-class) =====")
     print("accuracy        :", accuracy)
     print("f1_macro        :", f1_macro)
@@ -186,6 +283,14 @@ def main():
     print("precision_macro :", precision_macro)
     print("recall_macro    :", recall_macro)
     print("auc_macro_ovr   :", auc_macro_ovr)
+
+    print("\n----- Per-class metrics -----")
+    for i, lid in enumerate(label_ids):
+        name = label_names.get(lid, str(lid))
+        print(f"[{lid}] {name}")
+        print(f"  precision: {precision_per_class[i]:.4f}")
+        print(f"  recall   : {recall_per_class[i]:.4f}")
+        print(f"  f1       : {f1_per_class[i]:.4f}")
 
 
 if __name__ == "__main__":
