@@ -56,7 +56,7 @@ class FramingDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_len = max_len
 
-        required = {"original", "article_text", "label"}
+        required = {"distorted", "article_text", "label"}
         if not required.issubset(self.df.columns):
             raise ValueError(f"Dataset missing required columns: {required}")
 
@@ -328,3 +328,4 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     train_projection(args)
+
