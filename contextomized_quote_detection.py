@@ -77,8 +77,6 @@ def main():
     X_train, y_train = ros.fit_resample(X=df_train.loc[:, ['article_text', 'distorted']].values, y=df_train['label'])
     df_train_ros = pd.DataFrame(X_train, columns=['article_text', 'distorted'])
     df_train_ros['label'] = y_train
-    # RAM 방지를 위해 Oversampled 데이터 2000개만 사용
-    df_train_ros = df_train_ros.sample(n=2000, random_state       =args.seed).reset_index(drop=True)
 
     loss_func = nn.CrossEntropyLoss(reduction='mean')
     
@@ -295,3 +293,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
