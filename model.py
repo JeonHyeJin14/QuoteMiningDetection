@@ -1,7 +1,7 @@
 import torch.nn as nn
 
 class FramingClassifier(nn.Module):
-"""
+    """
     사전 학습된 언어 모델(Pre-trained Backbone) 위에 분류 레이어(Classification Head)를 부착한 모델입니다.
     
     구조:
@@ -82,4 +82,5 @@ class FramingClassifier(nn.Module):
         logits = self.classifier(x)
         
         return logits
+
 
