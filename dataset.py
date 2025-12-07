@@ -3,7 +3,7 @@ import pandas as pd
 from torch.utils.data import Dataset
 
 class FramingDataset(Dataset):
-"""
+    """
     CSV 데이터를 읽어서 RoBERTa 모델 입력용 Tensor로 변환하는 클래스입니다.
     
     기능:
@@ -85,4 +85,5 @@ class FramingDataset(Dataset):
             item["token_type_ids"] = encoding["token_type_ids"].squeeze(0)
             
         return item
+
 
