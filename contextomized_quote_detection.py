@@ -21,8 +21,7 @@ from sklearn.model_selection import train_test_split
 from imblearn.over_sampling import RandomOverSampler
 from sklearn.metrics import f1_score, accuracy_score, roc_auc_score, recall_score, precision_score
 from transformers import get_cosine_schedule_with_warmup
-from kobert_transformers import get_kobert_model
-from kobert_transformers import get_tokenizer
+from transformers import AutoModel, AutoTokenizer
 
 
 def main():
@@ -64,9 +63,10 @@ def main():
 # args.batch_size = args.batch_size * torch.cuda.device_count()
 
     
-        # KoBERT 백본 & 토크나이저
-    args.backbone_model = get_kobert_model()
-    args.tokenizer = get_tokenizer()
+        # 백본 & 토크나이저
+    print("[INFO] Loading RoBERTa-base (English)...")
+    args.backbone_model = AutoModel.from_pretrained("roberta-base")
+    args.tokenizer = AutoTokenizer.from_pretrained("roberta-base")
     
     df = pd.read_csv(args.DATA_DIR)
     df_train, df_test = train_test_split(df, test_size=0.2, random_state=args.split_seed, stratify=df['label'])
@@ -311,5 +311,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
