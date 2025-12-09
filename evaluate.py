@@ -154,7 +154,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="학습된 모델 평가 스크립트")
     
     # 데이터 경로 및 모델 경로 설정
-    parser.add_argument("--data_path", type=str, default="data/dataset.csv", help="평가할 데이터셋 파일 경로 (.csv))
+    parser.add_argument("--data_path", type=str, default="data/dataset.csv", help="평가할 데이터셋 파일 경로 (.csv)")
     parser.add_argument("--model_path", type=str, default="./model_result/classifier_best.bin", help="저장된 모델 가중치 파일 경로")
     
     # 모델 하이퍼파라미터
@@ -170,4 +170,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     evaluate(args)
+
 
