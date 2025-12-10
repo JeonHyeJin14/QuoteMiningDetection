@@ -4,7 +4,7 @@ from torch.utils.data import Dataset
 
 class FramingDataset(Dataset):
     """
-    CSV 데이터를 읽어서 RoBERTa 모델 입력용 Tensor로 변환하는 클래스입니다.
+    CSV 데이터를 읽어서 모델 입력용 Tensor로 변환하는 클래스입니다.
     
     기능:
         - 문장 쌍(Sentence Pair) 학습을 전제로 합니다.
@@ -16,7 +16,7 @@ class FramingDataset(Dataset):
         Args:
             df (pd.DataFrame): 전처리된 데이터프레임. 
                                필수 컬럼: 'distorted', 'article_text', 'label'
-            tokenizer: HuggingFace Transformers Tokenizer (예: RoBERTaTokenizer)
+            tokenizer: HuggingFace Transformers Tokenizer
             max_len (int): 토큰화 시 적용할 최대 시퀀스 길이 (Default: 256)
         """
         self.df = df.reset_index(drop=True)
@@ -58,7 +58,6 @@ class FramingDataset(Dataset):
             # 'distorted'(왜곡된 문장/원문)와 'article'(기사 문장)을 함께 입력합니다.
             # Tokenizer가 자동으로 [CLS] 문장1 [SEP] 문장2 [SEP] 형태로 구성합니다.
             original = str(row["distorted"])
-            # RoBERTa Tokenizer가 알아서 [CLS]..[SEP]..[SEP] 형태로 처리함
             encoding = self.tokenizer(
                 original, article, 
                 truncation=True, padding="max_length", max_length=self.max_len, return_tensors="pt"
@@ -85,5 +84,6 @@ class FramingDataset(Dataset):
             item["token_type_ids"] = encoding["token_type_ids"].squeeze(0)
             
         return item
+
 
 
