@@ -50,7 +50,7 @@ pip install torch transformers pandas scikit-learn tqdm matplotlib
 저장소 용량 제한으로 인해, 학습이 완료된 모델 가중치 파일(`.bin`)은 별도 드라이브를 통해 제공합니다.
 모델 평가(`evaluate.py`)를 바로 실행하려면 아래 링크에서 파일을 다운로드해 주세요.
 
-1. **다운로드 링크**: [👉 Google Drive Link 클릭](https://drive.google.com/file/d/1HPxEadqlncVRE8QFJ9wwI0eUPTXINmSx/view?usp=sharing)
+1. **다운로드 링크**: [👉 Google Drive Link 클릭](https://drive.google.com/file/d/1bhAxZ12zPr1bAP2YsdDn2Oq6c-oCl7No/view?usp=sharing)
 2. **설치 경로**: 다운로드한 `classifier_best.bin` 파일을 프로젝트 루트의 `model_result/` 폴더 안에 넣어주세요.
 
 ```bash
@@ -125,6 +125,7 @@ python evaluate.py
   ▶ 확률 분석: 정상 12.5% vs 왜곡 87.5%
   ✅ 정답입니다!
   ```
+
 
 
 
