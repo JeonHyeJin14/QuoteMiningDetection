@@ -236,7 +236,7 @@ if __name__ == "__main__":
     
     # [Model Params]
     parser.add_argument("--backbone", type=str, default="hf", help="Backbone 타입 (hf)")
-    parser.add_argument("--hf_model_name", type=str, default="roberta-base", help="HuggingFace 모델명")
+    parser.add_argument("--hf_model_name", type=str, default="sentence-transformers/all-mpnet-base-v2", help="HuggingFace 모델명")
     parser.add_argument("--max_len", type=int, default=256, help="입력 시퀀스 최대 길이")
     parser.add_argument("--num_classes", type=int, default=2, help="분류 클래스 수")
     
@@ -256,4 +256,5 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     main(args)
+
 
